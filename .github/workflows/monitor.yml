@@ -1,0 +1,64 @@
+name: DNS + Infra Monitoring
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every 1 hour
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Install dnsx & asnmap
+      run: |
+        go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+        go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest
+        echo "$HOME/go/bin" >> $GITHUB_PATH
+
+    - name: DNS Resolve
+      run: |
+        cat targets.txt | dnsx -silent -a | sort -u > dns_new.txt
+
+    - name: ASN Mapping
+      run: |
+        awk '{print $2}' dns_new.txt | sort -u | asnmap -silent > asn_new.txt
+
+    - name: Compare & Telegram Alert
+      run: |
+        DNS_DIFF=$(diff data/dns_old.txt dns_new.txt || true)
+        ASN_DIFF=$(diff data/asn_old.txt asn_new.txt || true)
+
+        if [ -n "$DNS_DIFF" ] || [ -n "$ASN_DIFF" ]; then
+          MESSAGE="🚨 DNS / Infra Change Detected\n\n"
+          [ -n "$DNS_DIFF" ] && MESSAGE="$MESSAGE📡 DNS Change:\n$DNS_DIFF\n\n"
+          [ -n "$ASN_DIFF" ] && MESSAGE="$MESSAGE🌍 ASN Change:\n$ASN_DIFF\n"
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
+            -d text="$MESSAGE"
+        fi
+
+    - name: Update baseline
+      run: |
+        mv dns_new.txt data/dns_old.txt
+        mv asn_new.txt data/asn_old.txt
+
+    - name: Commit updated data
+      run: |
+        git config --global user.name "github-actions"
+        git config --global user.email "bot@github.com"
+        git add data/*
+        git commit -m "auto: update dns/asn baseline" || echo "No changes"
+        git push
